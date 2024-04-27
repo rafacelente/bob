@@ -1,0 +1,11 @@
+lightning_logs/
+test-images/
+**/__pycache__/
+build
+dist
+.mypy_cache
+__pycache__
+*.pyc
+.tox
+*.egg-info
+.mypy_cache
