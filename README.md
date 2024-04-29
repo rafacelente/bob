@@ -1,3 +1,3 @@
-# bixtral
+# BoB
 
-bixtral is a b1.58 model based on the Mixtral Mixture of Expertes model.
+BoB is a b1.58 SMoE model with both attention and feedforward experts (MoA, MoE). [under construction]
