@@ -1,0 +1,64 @@
+[project]
+name = "bob"
+description = "BitLinear MoA MoE."
+readme = "README.md"
+authors = [{ name = "Rafael Celente"}]
+
+requires-python = ">=3.9,<3.12"
+dependencies = [
+    "pyparsing>=3.1.2",
+    "lightning>=2.2.3",
+    "transformers>=4.39.3",
+]
+
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest >= 7.2.0, <7.3",
+    "pylint >= 2.15.8, <2.16",
+]
+bench = [
+    "pillow>=10.3.0",
+    "six>=1.16.0",
+    "pandas>=2.2.1",
+]
+
+[build-system]
+requires = ["setuptools>=65.0,<66.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["bob", "bob.kernels"]
+
+
+[[tool.mypy.overrides]]
+module = [
+    "toml",
+]
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 80
+
+[tool.pylint.MASTER]
+ignore = "tests"
+jobs = 0
+extension-pkg-whitelist = "pydantic"
+
+[tool.pylint.'MESSAGES CONTROL']
+disable = [
+    "missing-module-docstring",
+    "invalid-name",
+    "consider-using-from-import",
+    "missing-function-docstring",
+    "super-with-arguments",
+    "arguments-renamed",
+    "consider-using-from-import"
+]
+
+[tool.pylint.BASIC]
+good-names = ["M", "N", "y", ]
+
+[tool.pylint.TYPECHECK]
+ignored-modules = ["pydantic"]
