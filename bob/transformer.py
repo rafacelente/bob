@@ -1,14 +1,21 @@
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    from flash_attn import flash_attn_func
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    FLASH_ATTN_AVAILABLE = False
+
 from .bitlinear import BitLinear
 from .utils import apply_rotary_emb, precompute_freqs_cis, RMSNorm
 from .config import BoBConfig
 from .moe import MoeLayer
 
 # pylint: disable=W0223,R0402,R0902
-
-class Attention(nn.Module):
+class EagerAttention(nn.Module):
     """Attention Module with BitLinear weights"""
     def __init__(self, config: BoBConfig):
         super().__init__()
@@ -49,15 +56,51 @@ class Attention(nn.Module):
         queries = xq.transpose(1,2)
 
         # TODO: flashattn2
-        if self.memory_efficient:
-            attn_output = memory_efficient_attention(
-                queries, keys, values, None, self.attn_drop
-            ) # by default xformers scales the attention weights by 1/sqrt(d_k)
-        else:
-            attn = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
-            attn = attn + mask[:,:, :seqlen, :seqlen]
-            attn = F.softmax(attn.float(), dim=-1).type_as(queries)
-            attn_output = torch.matmul(attn, values)
+        attn = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn = attn + mask[:,:, :seqlen, :seqlen]
+        attn = F.softmax(attn.float(), dim=-1).type_as(queries)
+        attn_output = torch.matmul(attn, values)
+
+        attn_output = self.attn_drop(attn_output)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        return self.wo(attn_output, inference)
+    
+class FlashAttention(EagerAttention):
+    """FlashAttention Module with BitLinear weights"""
+    def __init__(
+            self,
+            config: BoBConfig,
+        ):
+        super().__init__(config)
+    
+    def forward(
+            self,
+            x: torch.Tensor,
+            freq_cis: torch.Tensor,
+            mask: torch.Tensor = None,
+            inference: bool = False,
+        ):
+
+        bsz, seqlen, _ = x.shape
+        xq, xk, xv = self.wq(x, inference), self.wk(x, inference), self.wv(x, inference)
+        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_heads, self.head_dim)
+
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freq_cis)
+
+        keys = xk.transpose(1,2)
+        values = xv.transpose(1,2)
+        queries = xq.transpose(1,2)
+
+        attn_output = flash_attn_func(
+            queries,
+            keys,
+            values,
+            dropout_p=self.attn_drop,
+            softmax_scale=None, 
+            causal=False,
+        )
 
         attn_output = self.attn_drop(attn_output)
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
@@ -85,7 +128,12 @@ class TransformerBlock(nn.Module):
             config: BoBConfig,
         ):
         super().__init__()
-        self.attn = Attention(config)
+        if config.memory_efficient_attention and FLASH_ATTN_AVAILABLE:
+            self.attn = FlashAttention(config)
+        else:
+            logging.warning("Using Eager Attention. Consider using memory_efficient_attention=True.")
+            self.attn = EagerAttention(config)
+        
         if config.bitlinear_gates:
             gate = BitLinear(config.hidden_dim, config.num_experts)
         else:
