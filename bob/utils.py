@@ -1,87 +1,6 @@
-from typing import Tuple
+from typing import Tuple, Optional
 import torch
 import torch.nn as nn
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    """
-    From: https://github.com/meta-llama/llama/blob/main/llama/model.py
-    Reshape frequency tensor for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
-    """
-    ndim = x.ndim
-    assert 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i in (1, ndim - 1) else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    From: https://github.com/meta-llama/llama/blob/main/llama/model.py
-    Apply rotary embeddings to input tensors using the given frequency tensor.
-
-    This function applies rotary embeddings to the given query 'xq' and key 'xk'
-    tensors using the provided frequency tensor 'freqs_cis'. The input tensors are
-    reshaped as complex numbers, and the frequency tensor is reshaped for broadcasting
-    compatibility. The resulting tensors contain rotary embeddings and are returned
-    as real tensors.
-
-    Args:
-        xq (torch.Tensor): Query tensor to apply rotary embeddings.
-        xk (torch.Tensor): Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key
-                                            tensor with rotary embeddings.
-    """
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    # pylint: disable=C0301
-    """
-    From: https://github.com/meta-llama/llama/blob/main/llama/model.py
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
-
-    This function calculates a frequency tensor with complex exponentials
-    using the given dimension 'dim' and the end index 'end'.
-    The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
-
-    Args:
-        dim (int): Dimension of the frequency tensor.
-        end (int): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
-
-    Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
-    """
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
 
 class RMSNorm(nn.Module):
     """Eager RMSNorm used by BitLinear"""
@@ -94,3 +13,84 @@ class RMSNorm(nn.Module):
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * x
+
+class RotaryEmbeddings(nn.Module):
+    """
+        Faster (yet still eager) Rotary Embeddings
+        Adapted from transformers.src.transformers.models.mixtral.modeling_mixtral
+    """
+    def __init__(
+            self,
+            dim: int,
+            max_seq_len: int,
+            theta=10000.0,
+            device=None,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        self.device = device
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, dtype=torch.int64).float().to(self.device) / dim))
+        self.register_buffer('inv_freq', inv_freq, persistent=False)
+
+        self._set_cos_sin_cache(
+            seq_len=self.max_seq_len, device=self.device, dtype=torch.get_default_dtype()
+        )
+
+    def _set_cos_sin_cache(
+            self,
+            seq_len: int,
+            device: Optional[bool]=None,
+            dtype: Optional[torch.dtype]=None,
+            ):
+        t = torch.arange(seq_len, device=device, dtype=torch.int64).type_as(self.inv_freq)
+        freqs = torch.einsum('i,j->ij', t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer('cos_cache', emb.cos().to(dtype), persistent=False)
+        self.register_buffer('sin_cache', emb.sin().to(dtype), persistent=False)
+
+    def forward(
+            self,
+            x: torch.Tensor,
+            seq_len: Optional[int]=None,
+            ):
+        if seq_len is None:
+            seq_len = x.shape[1]
+        if seq_len > self.max_seq_len:
+            self._set_cos_sin_cache(seq_len, self.device, x.dtype)
+
+        return (
+            self.cos_cache[:seq_len].to(x.dtype),
+            self.sin_cache[:seq_len].to(x.dtype),
+        )
+
+def rotate_half(x: torch.Tensor):
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_emb(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        position_ids: torch.Tensor,
+    ):
+    cos = cos_cache[position_ids]
+    sin = sin_cache[position_ids]
+    q_embed = q * cos + rotate_half(q) * sin
+    k_embed = k * cos + rotate_half(k) * sin
+    return q_embed, k_embed
+
+# Copied from transformers.models.llama.modeling_llama.repeat_kv
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)

@@ -1,18 +1,15 @@
+from typing import Optional
 import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-try:
-    from flash_attn import flash_attn_func
-    FLASH_ATTN_AVAILABLE = True
-except ImportError:
-    FLASH_ATTN_AVAILABLE = False
-
 from .bitlinear import BitLinear
-from .utils import apply_rotary_emb, precompute_freqs_cis, RMSNorm
+from .utils import RotaryEmbeddings, RMSNorm, apply_rotary_pos_emb, repeat_kv
 from .config import BoBConfig
 from .moe import MoeLayer
+
+# TODO: add support for FlashAttention from Dao
+FLASH_ATTN_AVAILABLE = hasattr(F, 'scaled_dot_product_attention')
 
 # pylint: disable=W0223,R0402,R0902
 class EagerAttention(nn.Module):
@@ -22,14 +19,20 @@ class EagerAttention(nn.Module):
         self.config = config
         self.head_dim = config.hidden_dim // config.num_heads
         self.n_heads = config.num_heads
+        self.n_kv_heads = config.num_kv_heads
+        self.kv_groups = config.num_heads // config.num_kv_heads
         self.hidden_size = config.hidden_dim
         self.attn_dropout = config.attn_dropout
         self.proj_dropout = config.proj_dropout
-        self.memory_efficient = config.memory_efficient_attention
 
+        self.rotary_emb = RotaryEmbeddings(
+            self.head_dim,
+            max_seq_len=config.seq_len,
+            theta=config.rope_theta,
+        )
         self.wq = BitLinear(self.hidden_size, self.hidden_size, bias=False)
-        self.wk = BitLinear(self.hidden_size, self.hidden_size, bias=False)
-        self.wv = BitLinear(self.hidden_size, self.hidden_size, bias=False)
+        self.wk = BitLinear(self.hidden_size, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = BitLinear(self.hidden_size, self.n_kv_heads * self.head_dim, bias=False)
         self.attn_drop = nn.Dropout(self.attn_dropout)
         self.wo = BitLinear(self.hidden_size, self.hidden_size, bias=False)
         self.proj_drop = nn.Dropout(self.proj_dropout)
@@ -37,33 +40,32 @@ class EagerAttention(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            freq_cis: torch.Tensor,
-            mask: torch.Tensor = None,
-            inference: bool = False,
+            position_ids: Optional[torch.LongTensor] = None,
+            mask: Optional[torch.Tensor] = None,
+            inference: Optional[bool] = False,
         ):
         # pylint: disable=W0511
 
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x, inference), self.wk(x, inference), self.wv(x, inference)
-        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_heads, self.head_dim)
+        queries = xq.view(bsz, seqlen, self.n_heads, self.head_dim).transpose(1,2)
+        keys = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim).transpose(1,2)
+        values = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim).transpose(1,2)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freq_cis)
+        cos, sin = self.rotary_emb(values, seq_len=seqlen)
+        queries, keys = apply_rotary_pos_emb(queries, keys, cos, sin, position_ids=position_ids)
+        
+        keys = repeat_kv(keys, self.kv_groups)
+        values = repeat_kv(values, self.kv_groups)
 
-        keys = xk.transpose(1,2)
-        values = xv.transpose(1,2)
-        queries = xq.transpose(1,2)
-
-        # TODO: flashattn2
         attn = torch.matmul(queries, keys.transpose(-2, -1)) / (self.head_dim ** 0.5)
         attn = attn + mask[:,:, :seqlen, :seqlen]
         attn = F.softmax(attn.float(), dim=-1).type_as(queries)
         attn_output = torch.matmul(attn, values)
 
-        attn_output = self.attn_drop(attn_output)
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(attn_output, inference)
+        attn_output = self.wo(attn_output, inference)
+        return attn_output
     
 class FlashAttention(EagerAttention):
     """FlashAttention Module with BitLinear weights"""
@@ -76,35 +78,33 @@ class FlashAttention(EagerAttention):
     def forward(
             self,
             x: torch.Tensor,
-            freq_cis: torch.Tensor,
-            mask: torch.Tensor = None,
-            inference: bool = False,
+            position_ids: Optional[torch.LongTensor] = None,
+            mask: Optional[torch.Tensor] = None,
+            inference: Optional[bool] = False,
         ):
-
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x, inference), self.wk(x, inference), self.wv(x, inference)
-        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_heads, self.head_dim)
+        queries = xq.view(bsz, seqlen, self.n_heads, self.head_dim).transpose(1,2)
+        keys = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim).transpose(1,2)
+        values = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim).transpose(1,2)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freq_cis)
+        cos, sin = self.rotary_emb(values, seq_len=seqlen)
+        queries, keys = apply_rotary_pos_emb(queries, keys, cos, sin, position_ids=position_ids)
 
-        keys = xk.transpose(1,2)
-        values = xv.transpose(1,2)
-        queries = xq.transpose(1,2)
+        keys = repeat_kv(keys, self.kv_groups)
+        values = repeat_kv(values, self.kv_groups)
 
-        attn_output = flash_attn_func(
+        attn_output = F.scaled_dot_product_attention(
             queries,
             keys,
             values,
-            dropout_p=self.attn_drop,
-            softmax_scale=None, 
-            causal=False,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+            is_causal=self.training,
         )
 
-        attn_output = self.attn_drop(attn_output)
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(attn_output, inference)
+        attn_output = self.wo(attn_output, inference)
+        return attn_output
 
 class FeedForward(nn.Module):
     """FeedForward SwiGLU module with BitLinear weights"""
@@ -142,7 +142,7 @@ class TransformerBlock(nn.Module):
             experts=[
                 FeedForward(
                     config.hidden_dim,
-                    config.hidden_dim
+                    config.intermediate_dim,
                 ) for _ in range(config.num_experts)
                 ],
             gate=gate,
@@ -153,28 +153,26 @@ class TransformerBlock(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            freq_cis: torch.Tensor,
+            mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
             inference: bool = False,
-        ):
+        ) -> torch.Tensor:
         # bitlinear has built-in rmsnorm
-        h = x + self.attn(x, freq_cis, mask=None, inference=inference)
+        h = self.attn(
+            x,
+            mask=mask,
+            position_ids=position_ids,
+            inference=inference,
+            )
+        h = x + h
         return h + self.ff(h, inference=inference)
 
 class Transformer(nn.Module):
     """
-    Transformer module based on the Mixtral architecture.
+    Transformer module based on SMoE architecture.
 
     Args:
-        config (bixtralConfig): Configuration object containing model hyperparameters.
-
-    Attributes:
-        config (bixtralConfig): Configuration object containing model hyperparameters.
-        embed (nn.Embedding): Embedding layer for input tokens.
-        blocks (nn.ModuleList): List of TransformerBlock instances.
-        norm (RMSNorm): Normalization layer.
-        freq_cis (torch.Tensor): Precomputed frequency tensor.
-        vocab_proj (nn.Linear): Linear projection layer for output vocabulary.
-        mask (torch.Tensor): Mask for attention mechanism.
+        config (BoBConfig): Configuration object containing model hyperparameters.
     """
 
     def __init__(
@@ -185,34 +183,43 @@ class Transformer(nn.Module):
         self.config = config
         self.embed = nn.Embedding(config.vocab_size, config.hidden_dim)
         self.blocks = nn.ModuleList([
-                TransformerBlock(config) for _ in range(config.num_layers)
+                TransformerBlock(config, layer_idx) for layer_idx in range(config.num_layers)
             ])
         self.norm = RMSNorm(config.hidden_dim)
-        self.freq_cis = precompute_freqs_cis(
-            config.hidden_dim // config.num_heads, config.seq_len * 2
-        )
         self.vocab_proj = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
         if not config.memory_efficient_attention:
             mask = torch.full(
                 (1,1,config.seq_len,config.seq_len),
                 float('-inf'),
-                device=self.freq_cis.device,
-                dtype=self.freq_cis.dtype
             )
             mask = torch.triu(mask, diagonal=1)
-            self.register_buffer('mask', mask)
         else:
             mask = None
+        self.register_buffer('mask', mask)
 
     def forward(
             self,
             x: torch.Tensor,
+            position_ids: Optional[torch.LongTensor] = None,
             inference: bool = False,
         ):
         _, seqlen = x.shape
+        if position_ids is None:
+            device = x.device
+            position_ids = torch.arange(
+                0, seqlen, dtype=torch.long, device=device
+            )
+            position_ids = position_ids.unsqueeze(0).view(-1, seqlen)
+        else:
+            position_ids = position_ids.view(-1, seqlen).long()
+
         x = self.embed(x)
-        freq_cis = self.freq_cis[:seqlen].to(x.device)
         for _, blk in enumerate(self.blocks):
-            x = blk(x, freq_cis, inference=inference)
+            x = blk(
+                x,
+                mask=self.mask,
+                position_ids=position_ids,
+                inference=inference
+            )
         x = self.norm(x)
         return self.vocab_proj(x)
