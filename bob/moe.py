@@ -28,12 +28,12 @@ class MoeLayer(nn.Module):
         self.num_experts = num_experts
         self.num_experts_per_token = num_experts_per_token
 
-    def forward(self, x):
+    def forward(self, x, inference=False):
         gate = self.gate(x)
         weights, selected_experts = torch.topk(gate, self.num_experts_per_token)
         weights = F.softmax(weights, dim=-1, dtype=torch.float).to(x.dtype)
         output = torch.zeros_like(x)
         for i, expert in enumerate(self.experts):
-            batch_idx, nth_expert = torch.where(selected_experts == i)
-            output[batch_idx] = weights[batch_idx, nth_expert, None] * expert(x[batch_idx])
+            batch_idx, nth_expert, _ = torch.where(selected_experts == i)
+            output[batch_idx] = weights[batch_idx, nth_expert, None] * expert(x[batch_idx], inference=inference)
         return output
