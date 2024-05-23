@@ -44,12 +44,8 @@ class BoB(pl.LightningModule):
             print(f'Mode size before quantization: {size_before_quant} MB')
         for _, layer in self.model.named_modules():
             if isinstance(layer, BitLinear):
-                for k, v in layer.state_dict().items():
-                    if 'weight' in k and 'norm' not in k:
-                        w_quant, scale = quantize_weights_to_int8(v)
-                        layer.weight.requires_grad = False
-                        layer.weight.data = w_quant
-                        layer.weight_scale = scale
+                layer.quantize_()
+    
         if verbose:
             size_after_quant = self.get_model_size_in_bytes()
             print(f'Mode size after quantization: {size_after_quant} MB')

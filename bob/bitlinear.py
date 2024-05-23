@@ -2,7 +2,7 @@ from typing import Optional
 import torch.nn as nn
 import torch.nn.functional as F
 from .utils import RMSNorm
-from .quantization import weight_quant, activation_quant, activation_post_quant
+from .quantization import weight_quant, activation_quant, activation_post_quant, quantize_weights_to_int8
 
 class BitLinear(nn.Linear):
     """
@@ -26,6 +26,19 @@ class BitLinear(nn.Linear):
         self.rms_norm = RMSNorm(in_features)
         self.weight_scale = None
         nn.init.kaiming_normal_(self.weight, mode='fan_out', nonlinearity='relu')
+
+    def quantize_(self):
+        """
+            Quantize the weights to 1.58-bit
+            and create weight_scale for inference.
+        """
+        for k, v in self.state_dict().items():
+            if 'weight' in k and 'norm' not in k:
+                w_quant, scale = quantize_weights_to_int8(v)
+                self.weight.requires_grad = False
+                self.weight.data = w_quant
+                self.weight_scale = scale
+
 
     def forward(self, x, inference: Optional[bool]=False):
         w = self.weight
