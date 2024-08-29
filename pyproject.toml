@@ -1,64 +1,85 @@
-[project]
+[tool.poetry]
 name = "bob"
-description = "BitLinear MoE."
+version = "0.1.0"
+description = "BitLinear MoE"
+authors = ["Rafael Celente <rafaelmcelente@gmail.com>"]
 readme = "README.md"
-authors = [{ name = "Rafael Celente"}]
 
-requires-python = ">=3.9,<3.12"
-dependencies = [
-    "pyparsing>=3.1.2",
-    "lightning>=2.2.3",
-    "transformers>=4.39.3",
+[tool.poetry.dependencies]
+python = "^3.9"
+pyparsing = "^3.1.2"
+lightning = "^2.4.0"
+transformers = "^4.44.1"
+
+[tool.poetry.group.dev.dependencies]
+pillow = "^10.4.0"
+six = "^1.16.0"
+pandas = "^2.2.2"
+ruff = "^0.6.1"
+
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
 ]
 
-dynamic = ["version"]
+# Same as Black.
+line-length = 88
+indent-width = 4
 
-[project.optional-dependencies]
-dev = [
-    "pytest >= 7.2.0, <7.3",
-    "pylint >= 2.15.8, <2.16",
-]
-bench = [
-    "pillow>=10.3.0",
-    "six>=1.16.0",
-    "pandas>=2.2.1",
-]
+# Assume Python 3.8
+target-version = "py310"
+
+[tool.ruff.lint]
+# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
+# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
+# McCabe complexity (`C901`) by default.
+select = ["E4", "E7", "E9", "F"]
+ignore = []
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
 
 [build-system]
-requires = ["setuptools>=65.0,<66.0"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-packages = ["bob", "bob.kernels"]
-
-
-[[tool.mypy.overrides]]
-module = [
-    "toml",
-]
-ignore_missing_imports = true
-
-[tool.black]
-line-length = 80
-
-[tool.pylint.MASTER]
-ignore = "tests"
-jobs = 0
-extension-pkg-whitelist = "pydantic"
-
-[tool.pylint.'MESSAGES CONTROL']
-disable = [
-    "missing-module-docstring",
-    "invalid-name",
-    "consider-using-from-import",
-    "missing-function-docstring",
-    "super-with-arguments",
-    "arguments-renamed",
-    "consider-using-from-import"
-]
-
-[tool.pylint.BASIC]
-good-names = ["M", "N", "y", ]
-
-[tool.pylint.TYPECHECK]
-ignored-modules = ["pydantic"]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
