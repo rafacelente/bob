@@ -1,4 +1,3 @@
-import pytest
 
 def test_transformer_forward():
     from bob import Transformer, BoBConfig

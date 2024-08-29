@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import Optional
 import torch
 import torch.nn as nn
 
@@ -23,7 +23,7 @@ class RotaryEmbeddings(nn.Module):
             self,
             dim: int,
             max_seq_len: int,
-            theta=10000.0,
+            theta: float = 10000.0,
             device=None,
     ):
         super().__init__()

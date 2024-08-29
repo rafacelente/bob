@@ -5,6 +5,9 @@ from bob.kernels import RMSNormFused
 
 rms_norm = RMSNormFused.apply
 
+def gbps(ms, x: torch.Tensor):
+        return 2 * x.nelement() * x.element_size() * 1e-9 / (ms * 1e-3)
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],  # argument names to use as an x-axis for the plot
@@ -36,8 +39,7 @@ def benchmark(batch, M, N, provider):
             eps=eps
         ).to('cuda')
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: eager_rmsnorm(x), quantiles=quantiles)
-    gbps = lambda ms: 2 * x.nelement() * x.element_size() * 1e-9 / (ms * 1e-3)
-    return gbps(ms), gbps(max_ms), gbps(min_ms)
+    return gbps(ms, x), gbps(max_ms, x), gbps(min_ms, x)
 
 
 # benchmark.run(show_plots=True, print_data=True)

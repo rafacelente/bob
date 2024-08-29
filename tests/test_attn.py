@@ -1,4 +1,3 @@
-import pytest
 
 def test_eager_and_flash_attn_equal_training_forward():
     from bob import EagerAttention, FlashAttention, BoBConfig

@@ -8,7 +8,6 @@ from torchmetrics.aggregation import SumMetric
 from transformers import get_cosine_schedule_with_warmup
 from .config import BoBConfig, TrainerConfig
 from .transformer import Transformer
-from .quantization import quantize_weights_to_int8
 from .bitlinear import BitLinear
 
 # pylint: disable=W0221,W0613,R0913,R0914,E0401
